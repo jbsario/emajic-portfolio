@@ -13,4 +13,4 @@ Allow: /
 User-agent: *
 Allow: /
 
-Sitemap: https://emajic-portfolio.vercel.app/sitemap.xml
+Sitemap: https://emajic.vercel.app/sitemap.xml
