@@ -188,7 +188,7 @@ const HeroSection = () => {
             animate={{ y: 0 }}
             transition={{ duration: 1, delay: 0.6, ease: [0.22, 1, 0.36, 1] }}
           >
-            — Interior Design Studio —
+            — Construction · Architecture · Interior Design —
           </motion.p>
         </motion.div>
 

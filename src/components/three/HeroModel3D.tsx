@@ -8,48 +8,81 @@ const GOLD = "#dcab2c";
 const GOLD_LIGHT = "#eec96c";
 const GOLD_DARK = "#9b7a27";
 
-const FLOOR_COUNT = 13;
-const FLOOR_HEIGHT = 0.17;
-const TOWER_W = 0.72;
-const TOWER_D = 0.52;
-const BUILDING_HEIGHT = FLOOR_COUNT * FLOOR_HEIGHT;
+// Palette matched to the approved perspective render: warm beige ground floor,
+// white upper volume, dark roof/window bands, wood-slat accents.
+const CONCRETE = "#98908a";
+const BEIGE = "#c9b28e";
+const WHITE = "#e8e2d5";
+const DARK = "#33302c";
+const WOOD = "#b08344";
+const GLASS = "#181614";
 
-type FloorRefs = {
-  group: THREE.Group | null;
-  material: THREE.MeshStandardMaterial | null;
+const HOUSE_HEIGHT = 1.3;
+
+type PieceDef = {
+  key: string;
+  size: [number, number, number];
+  /** Group position; y is the piece's bottom edge. */
+  position: [number, number, number];
+  color: string;
+  /** Progress window [start, end] during which this piece builds. */
+  phase: [number, number];
+  /** grow = rises from the ground like poured construction; fade = appears in place. */
+  mode: "grow" | "fade";
+  emissive?: string;
+  emissiveIntensity?: number;
+  edges?: boolean;
 };
 
-const Tower = ({ progress }: { progress: MotionValue<number> }) => {
+// Construction sequence: foundation → ground floor → second-floor slab →
+// upper volume + wood accent → staggered roofs → balcony → windows light up →
+// perimeter fence.
+const PIECES: PieceDef[] = [
+  { key: "foundation", size: [2.5, 0.08, 1.6], position: [0, 0, 0], color: CONCRETE, phase: [0.02, 0.1], mode: "grow" },
+  { key: "gf-main", size: [1.5, 0.5, 1.3], position: [-0.4, 0.08, 0], color: BEIGE, phase: [0.1, 0.28], mode: "grow", edges: true },
+  { key: "gf-column", size: [0.09, 0.5, 0.09], position: [1.02, 0.08, 0.5], color: DARK, phase: [0.24, 0.3], mode: "grow" },
+  { key: "slab-2f", size: [2.4, 0.08, 1.45], position: [0, 0.58, 0], color: CONCRETE, phase: [0.3, 0.38], mode: "grow" },
+  { key: "2f-main", size: [1.5, 0.5, 1.3], position: [-0.4, 0.66, 0], color: WHITE, phase: [0.38, 0.56], mode: "grow", edges: true },
+  { key: "wood-accent", size: [0.55, 0.5, 0.05], position: [0.02, 0.66, 0.66], color: WOOD, phase: [0.54, 0.62], mode: "grow" },
+  { key: "roof-main", size: [1.7, 0.08, 1.5], position: [-0.4, 1.16, 0], color: DARK, phase: [0.6, 0.7], mode: "grow", edges: true },
+  { key: "roof-upper", size: [0.9, 0.06, 1.2], position: [-0.7, 1.24, 0], color: DARK, phase: [0.66, 0.72], mode: "grow" },
+  { key: "balcony", size: [0.75, 0.06, 0.4], position: [0.72, 0.58, 0.78], color: WOOD, phase: [0.68, 0.74], mode: "grow" },
+  { key: "win-gf", size: [0.55, 0.28, 0.03], position: [-0.75, 0.2, 0.655], color: GLASS, phase: [0.72, 0.84], mode: "fade", emissive: GOLD, emissiveIntensity: 0.55 },
+  { key: "door", size: [0.32, 0.44, 0.03], position: [-0.12, 0.08, 0.655], color: GLASS, phase: [0.74, 0.86], mode: "fade", emissive: GOLD, emissiveIntensity: 0.35 },
+  { key: "win-2f", size: [1.15, 0.26, 0.03], position: [-0.42, 0.8, 0.655], color: GLASS, phase: [0.72, 0.84], mode: "fade", emissive: GOLD, emissiveIntensity: 0.6 },
+  { key: "fence-1", size: [0.55, 0.3, 0.05], position: [-1.0, 0, 1.05], color: BEIGE, phase: [0.82, 0.88], mode: "grow", edges: true },
+  { key: "fence-2", size: [0.55, 0.3, 0.05], position: [-0.35, 0, 1.05], color: BEIGE, phase: [0.85, 0.91], mode: "grow", edges: true },
+  { key: "fence-3", size: [0.55, 0.3, 0.05], position: [0.3, 0, 1.05], color: BEIGE, phase: [0.88, 0.94], mode: "grow", edges: true },
+];
+
+type PieceRefs = { group: THREE.Group | null; material: THREE.MeshStandardMaterial | null };
+
+const House = ({ progress }: { progress: MotionValue<number> }) => {
   const rootRef = useRef<THREE.Group>(null);
-  const floors = useRef<FloorRefs[]>([]);
+  const refs = useRef<PieceRefs[]>([]);
+  const railMaterialRef = useRef<THREE.LineBasicMaterial>(null);
+  const ghostMaterialRef = useRef<THREE.LineBasicMaterial>(null);
   const craneMastRef = useRef<THREE.Group>(null);
   const craneMaterialsRef = useRef<THREE.Material[]>([]);
   const cableRef = useRef<THREE.Mesh>(null);
-  const ghostMaterialRef = useRef<THREE.LineBasicMaterial>(null);
 
   const pointer = useRef({ x: 0, y: 0 });
   const target = useRef({ x: 0, y: 0 });
 
-  const floorDefs = useMemo(
+  const geometries = useMemo(
     () =>
-      Array.from({ length: FLOOR_COUNT }, (_, i) => {
-        const isSetback = i >= FLOOR_COUNT - 3;
-        const w = isSetback ? TOWER_W * 0.75 : TOWER_W;
-        const d = isSetback ? TOWER_D * 0.75 : TOWER_D;
-        const geometry = new THREE.BoxGeometry(w, FLOOR_HEIGHT, d);
-        const edges = new THREE.EdgesGeometry(geometry);
-        return { geometry, edges, baseY: i * FLOOR_HEIGHT };
+      PIECES.map((def) => {
+        const geometry = new THREE.BoxGeometry(...def.size);
+        return { geometry, edges: def.edges ? new THREE.EdgesGeometry(geometry) : null };
       }),
     []
   );
 
-  const ghostEdges = useMemo(
-    () => new THREE.EdgesGeometry(new THREE.BoxGeometry(TOWER_W, BUILDING_HEIGHT, TOWER_D)),
-    []
-  );
+  const ghostEdges = useMemo(() => new THREE.EdgesGeometry(new THREE.BoxGeometry(2.3, HOUSE_HEIGHT, 1.3)), []);
+  const railEdges = useMemo(() => new THREE.EdgesGeometry(new THREE.BoxGeometry(0.75, 0.22, 0.4)), []);
 
-  const craneHeight = BUILDING_HEIGHT + 0.5;
-  const craneX = TOWER_W / 2 + 0.32;
+  const craneHeight = HOUSE_HEIGHT + 0.45;
+  const craneX = 1.7;
 
   useEffect(() => {
     const handleMove = (e: PointerEvent) => {
@@ -67,100 +100,113 @@ const Tower = ({ progress }: { progress: MotionValue<number> }) => {
     pointer.current.x += (target.current.x - pointer.current.x) * 0.03;
     pointer.current.y += (target.current.y - pointer.current.y) * 0.03;
 
-    root.rotation.y += delta * 0.15 + pointer.current.x * 0.002;
-    root.rotation.x += delta * 0.04 + pointer.current.y * 0.001;
+    root.rotation.y += delta * 0.14 + pointer.current.x * 0.002;
 
     const p = progress.get();
     const t = state.clock.elapsedTime;
+    const pulse = (Math.sin(t * 6) + 1) / 2;
 
-    floors.current.forEach((floor, i) => {
-      if (!floor.group || !floor.material) return;
-      const floorStart = i / FLOOR_COUNT;
-      const floorEnd = (i + 1) / FLOOR_COUNT;
-      const localT = THREE.MathUtils.clamp((p - floorStart) / (floorEnd - floorStart), 0, 1);
+    PIECES.forEach((def, i) => {
+      const piece = refs.current[i];
+      if (!piece?.group || !piece.material) return;
+      const [start, end] = def.phase;
+      const localT = THREE.MathUtils.clamp((p - start) / (end - start), 0, 1);
+      const building = localT > 0 && localT < 1;
 
-      floor.group.visible = localT > 0.001;
-      floor.group.scale.y = Math.max(localT, 0.001);
-
-      if (localT < 1) {
-        const pulse = (Math.sin(t * 6) + 1) / 2;
-        floor.material.emissiveIntensity = 0.15 + pulse * 0.45;
+      if (def.mode === "grow") {
+        piece.group.visible = localT > 0.001;
+        piece.group.scale.y = Math.max(localT, 0.001);
+        piece.material.emissiveIntensity = building ? 0.15 + pulse * 0.5 : 0.06;
       } else {
-        floor.material.emissiveIntensity = 0.12;
+        piece.group.visible = localT > 0.01;
+        piece.material.opacity = localT;
+        piece.material.emissiveIntensity = localT * (def.emissiveIntensity ?? 0);
       }
     });
 
+    // Balcony railing appears with the balcony details
+    if (railMaterialRef.current) {
+      railMaterialRef.current.opacity = THREE.MathUtils.clamp((p - 0.74) / 0.06, 0, 1) * 0.9;
+    }
+
+    // Blueprint ghost of the finished house fades as reality replaces it
     if (ghostMaterialRef.current) {
       ghostMaterialRef.current.opacity = (1 - p) * 0.3;
     }
 
-    const currentHeight = THREE.MathUtils.clamp(p * FLOOR_COUNT, 0, FLOOR_COUNT) * FLOOR_HEIGHT;
-    const craneT = THREE.MathUtils.clamp((p - 0.75) / 0.2, 0, 1);
+    // Crane: slewing while building, gone at reveal
+    const craneT = THREE.MathUtils.clamp((p - 0.82) / 0.16, 0, 1);
     const craneOpacity = 1 - craneT;
-
     craneMaterialsRef.current.forEach((mat) => {
       if ("opacity" in mat) (mat as THREE.Material & { opacity: number }).opacity = craneOpacity;
     });
-
     if (craneMastRef.current) {
-      craneMastRef.current.rotation.y += delta * 0.4;
+      craneMastRef.current.rotation.y += delta * 0.35;
       craneMastRef.current.visible = craneOpacity > 0.01;
     }
-
     if (cableRef.current) {
-      const jibY = craneHeight;
-      const dist = Math.max(jibY - currentHeight, 0.01);
-      cableRef.current.position.set(0, currentHeight + dist / 2, 0);
+      const builtHeight = THREE.MathUtils.clamp(p / 0.7, 0, 1) * (HOUSE_HEIGHT - 0.06);
+      const dist = Math.max(craneHeight - builtHeight, 0.01);
+      cableRef.current.position.y = builtHeight + dist / 2 - 0; // relative to mast group at y 0
       cableRef.current.scale.y = dist;
     }
   });
 
   return (
-    <group ref={rootRef}>
-      {/* Site plaza base */}
-      <mesh position={[0, -0.03, 0]}>
-        <boxGeometry args={[1.6, 0.06, 1.2]} />
-        <meshStandardMaterial color={GOLD_DARK} metalness={0.4} roughness={0.7} transparent opacity={0.5} />
+    <group ref={rootRef} position={[0, -0.62, 0]}>
+      {/* Site plaza */}
+      <mesh position={[0, -0.035, 0]}>
+        <boxGeometry args={[3.1, 0.07, 2.3]} />
+        <meshStandardMaterial color={GOLD_DARK} metalness={0.4} roughness={0.7} transparent opacity={0.45} />
       </mesh>
 
-      {/* Ghost blueprint silhouette — fades out as the real tower rises */}
-      <lineSegments geometry={ghostEdges} position={[0, BUILDING_HEIGHT / 2, 0]}>
+      {/* Blueprint ghost silhouette */}
+      <lineSegments geometry={ghostEdges} position={[0, HOUSE_HEIGHT / 2, 0]}>
         <lineBasicMaterial ref={ghostMaterialRef} color={GOLD_LIGHT} transparent opacity={0.3} />
       </lineSegments>
 
-      {/* Floors, rising one by one */}
-      {floorDefs.map((def, i) => (
+      {/* House pieces */}
+      {PIECES.map((def, i) => (
         <group
-          key={i}
-          position={[0, def.baseY, 0]}
+          key={def.key}
+          position={def.position}
           ref={(el) => {
-            floors.current[i] = floors.current[i] ?? { group: null, material: null };
-            floors.current[i].group = el;
+            refs.current[i] = refs.current[i] ?? { group: null, material: null };
+            refs.current[i].group = el;
           }}
         >
-          <mesh position={[0, FLOOR_HEIGHT / 2, 0]} geometry={def.geometry}>
+          <mesh position={[0, def.size[1] / 2, 0]} geometry={geometries[i].geometry}>
             <meshStandardMaterial
               ref={(el) => {
-                floors.current[i] = floors.current[i] ?? { group: null, material: null };
-                floors.current[i].material = el;
+                refs.current[i] = refs.current[i] ?? { group: null, material: null };
+                refs.current[i].material = el;
               }}
-              color={GOLD}
-              metalness={0.8}
-              roughness={0.3}
-              emissive={GOLD_DARK}
-              emissiveIntensity={0.12}
+              color={def.color}
+              metalness={0.3}
+              roughness={0.6}
+              transparent
+              opacity={def.mode === "fade" ? 0 : 1}
+              emissive={def.emissive ?? GOLD_DARK}
+              emissiveIntensity={0.06}
             />
           </mesh>
-          <lineSegments position={[0, FLOOR_HEIGHT / 2, 0]} geometry={def.edges}>
-            <lineBasicMaterial color={GOLD_LIGHT} transparent opacity={0.5} />
-          </lineSegments>
+          {geometries[i].edges && (
+            <lineSegments position={[0, def.size[1] / 2, 0]} geometry={geometries[i].edges}>
+              <lineBasicMaterial color={GOLD_LIGHT} transparent opacity={0.28} />
+            </lineSegments>
+          )}
         </group>
       ))}
 
-      {/* Construction crane — present while building, fades near completion */}
+      {/* Balcony railing */}
+      <lineSegments geometry={railEdges} position={[0.72, 0.75, 0.78]}>
+        <lineBasicMaterial ref={railMaterialRef} color={GOLD_LIGHT} transparent opacity={0} />
+      </lineSegments>
+
+      {/* Tower crane */}
       <group ref={craneMastRef} position={[craneX, 0, 0]}>
         <mesh position={[0, craneHeight / 2, 0]}>
-          <boxGeometry args={[0.03, craneHeight, 0.03]} />
+          <boxGeometry args={[0.035, craneHeight, 0.035]} />
           <meshStandardMaterial
             ref={(el) => el && (craneMaterialsRef.current[0] = el)}
             color={GOLD_LIGHT}
@@ -170,8 +216,8 @@ const Tower = ({ progress }: { progress: MotionValue<number> }) => {
             emissiveIntensity={0.3}
           />
         </mesh>
-        <mesh position={[-0.28, craneHeight, 0]}>
-          <boxGeometry args={[0.56, 0.025, 0.025]} />
+        <mesh position={[-0.5, craneHeight, 0]}>
+          <boxGeometry args={[1.1, 0.03, 0.03]} />
           <meshStandardMaterial
             ref={(el) => el && (craneMaterialsRef.current[1] = el)}
             color={GOLD_LIGHT}
@@ -181,8 +227,8 @@ const Tower = ({ progress }: { progress: MotionValue<number> }) => {
             emissiveIntensity={0.3}
           />
         </mesh>
-        <mesh position={[0.12, craneHeight, 0]}>
-          <boxGeometry args={[0.16, 0.025, 0.025]} />
+        <mesh position={[0.22, craneHeight, 0]}>
+          <boxGeometry args={[0.3, 0.03, 0.03]} />
           <meshStandardMaterial
             ref={(el) => el && (craneMaterialsRef.current[2] = el)}
             color={GOLD_LIGHT}
@@ -192,8 +238,8 @@ const Tower = ({ progress }: { progress: MotionValue<number> }) => {
             emissiveIntensity={0.3}
           />
         </mesh>
-        <mesh ref={cableRef} position={[-0.28, craneHeight / 2, 0]}>
-          <cylinderGeometry args={[0.006, 0.006, 1, 6]} />
+        <mesh ref={cableRef} position={[-0.6, craneHeight / 2, 0]}>
+          <cylinderGeometry args={[0.007, 0.007, 1, 6]} />
           <meshBasicMaterial
             ref={(el) => el && (craneMaterialsRef.current[3] = el)}
             color={GOLD_LIGHT}
@@ -212,14 +258,14 @@ const HeroModel3D = ({ progress }: { progress: MotionValue<number> }) => {
       <Canvas
         dpr={[1, 1.5]}
         gl={{ alpha: true, antialias: true }}
-        camera={{ position: [1.6, 1.1, 4.6], fov: 32 }}
+        camera={{ position: [2.3, 1.15, 4.3], fov: 33 }}
         style={{ background: "transparent" }}
       >
-        <ambientLight intensity={0.4} />
+        <ambientLight intensity={0.45} />
         <pointLight position={[4, 4, 4]} intensity={1.2} color={GOLD_LIGHT} />
         <pointLight position={[-4, -2, -3]} intensity={0.6} color={GOLD} />
         <Suspense fallback={null}>
-          <Tower progress={progress} />
+          <House progress={progress} />
           <Sparkles count={20} scale={3.5} size={2} speed={0.3} color={GOLD_LIGHT} opacity={0.4} />
         </Suspense>
       </Canvas>
